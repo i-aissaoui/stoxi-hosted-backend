@@ -491,6 +491,43 @@ async def receive_user_update(user_data: Dict[str, Any], db: Session = Depends(g
         logger.error(f"❌ Error receiving user update: {e}")
         return {"success": False, "error": str(e)}
 
+@app.post("/sync/stock")
+async def receive_stock_update(stock_data: Dict[str, Any], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Receive stock update from local backend"""
+    global last_local_backend_ping
+    last_local_backend_ping = get_algeria_time()
+    
+    try:
+        variant_id = stock_data.get("variant_id")
+        product_id = stock_data.get("product_id")
+        
+        # Find variant by ID or product_id
+        variant = None
+        if variant_id:
+            variant = db.query(Variant).filter(Variant.id == variant_id).first()
+        elif product_id:
+            # Find first variant of the product
+            variant = db.query(Variant).filter(Variant.product_id == product_id).first()
+        
+        if variant:
+            # Update stock data
+            variant.quantity = stock_data.get("quantity", variant.quantity)
+            variant.price = stock_data.get("price", variant.price)
+            variant.stopped = stock_data.get("stopped", variant.stopped)
+            variant.last_synced = get_algeria_time()
+            
+            db.commit()
+            logger.info(f"📦 Received stock update: variant {variant_id}, qty: {variant.quantity}")
+        else:
+            logger.warning(f"⚠️ Variant not found for stock update: {variant_id}")
+        
+        return {"success": True, "message": "Stock updated", "timestamp": get_algeria_time().isoformat()}
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error receiving stock update: {e}")
+        return {"success": False, "error": str(e)}
+
 @app.post("/sync/categories")
 async def receive_category_update(category_data: Dict[str, Any], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Receive category update from local backend"""
@@ -587,6 +624,11 @@ async def mark_orders_synced(order_ids: List[int], db: Session = Depends(get_db)
         db.rollback()
         logger.error(f"❌ Error marking orders as synced: {e}")
         return {"success": False, "error": str(e)}
+
+@app.get("/sync/queued-orders")
+async def get_queued_orders_alt(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Alternative endpoint for queued orders (local backend compatibility)"""
+    return await get_queued_orders(db, current_user)
 
 @app.get("/sync/status")
 async def sync_status(db: Session = Depends(get_db)):
