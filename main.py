@@ -3,8 +3,9 @@ Hosted Backend v2 - Simplified (No Local Backend Calls)
 Local backend will connect to us instead!
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Query, BackgroundTasks, status
+from fastapi import FastAPI, HTTPException, Depends, Query, BackgroundTasks, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Numeric, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
@@ -17,6 +18,8 @@ import json
 import hashlib
 import secrets
 import pytz
+import shutil
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -163,6 +166,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Create static directories for images
+os.makedirs("static/images/products", exist_ok=True)
+os.makedirs("static/images/categories", exist_ok=True)
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Global variables
 last_local_backend_ping = None
@@ -542,6 +552,199 @@ async def sync_status(db: Session = Depends(get_db)):
         "timezone": "Africa/Algiers",
         "mode": "passive_receiver"
     }
+
+# Image Upload Endpoints
+
+@app.post("/upload/category-image/{category_id}")
+async def upload_category_image(
+    category_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Upload image for category"""
+    try:
+        # Check if category exists
+        category = db.query(Category).filter(Category.id == category_id).first()
+        if not category:
+            raise HTTPException(status_code=404, detail="Category not found")
+        
+        # Create directory
+        upload_dir = "static/images/categories"
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save file
+        ext = os.path.splitext(file.filename)[-1]
+        filename = f"category_{category_id}{ext}"
+        file_path = os.path.join(upload_dir, filename)
+        
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Update category image URL
+        category.image_url = f"/static/images/categories/{filename}"
+        db.commit()
+        
+        logger.info(f"📸 Category {category_id} image uploaded: {filename}")
+        
+        return {
+            "success": True,
+            "image_url": category.image_url,
+            "message": "Category image uploaded successfully"
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error uploading category image: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
+
+@app.post("/upload/product-image/{product_id}")
+async def upload_product_image(
+    product_id: int,
+    file: UploadFile = File(...),
+    set_as_main: bool = Form(False),
+    db: Session = Depends(get_db)
+):
+    """Upload image for product"""
+    try:
+        # Check if product exists
+        product = db.query(Product).filter(Product.id == product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        # Create directory for this product's images
+        product_dir = f"static/images/products/product_{product_id}"
+        os.makedirs(product_dir, exist_ok=True)
+        
+        # Check how many images already exist
+        existing_files = os.listdir(product_dir) if os.path.exists(product_dir) else []
+        image_number = len(existing_files) + 1
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1]
+        unique_filename = f"product_{image_number}{file_extension}"
+        file_path = os.path.join(product_dir, unique_filename)
+        
+        # Save file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Create image URL
+        image_url = f"/{file_path}"
+        
+        # Update product image URL if it's the first image or set_as_main is True
+        if set_as_main or image_number == 1:
+            product.image_url = image_url
+            db.commit()
+        
+        logger.info(f"📸 Product {product_id} image uploaded: {unique_filename}")
+        
+        return {
+            "success": True,
+            "image_url": image_url,
+            "is_main": set_as_main or image_number == 1,
+            "message": "Product image uploaded successfully"
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error uploading product image: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
+
+@app.get("/images/product/{product_id}")
+async def get_product_images(product_id: int, db: Session = Depends(get_db)):
+    """Get all images for a product"""
+    try:
+        # Check if product exists
+        product = db.query(Product).filter(Product.id == product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        # Check product's image directory
+        product_dir = f"static/images/products/product_{product_id}"
+        
+        if not os.path.exists(product_dir):
+            return {"success": True, "images": [], "count": 0}
+        
+        # Get all image files
+        image_files = [f for f in os.listdir(product_dir) 
+                      if os.path.isfile(os.path.join(product_dir, f)) and 
+                      f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))]
+        
+        # Create response
+        images = []
+        for img in image_files:
+            image_url = f"/{os.path.join(product_dir, img)}"
+            is_main = (product.image_url == image_url)
+            images.append({
+                "image_url": image_url,
+                "is_main": is_main,
+                "filename": img
+            })
+        
+        return {
+            "success": True,
+            "images": images,
+            "count": len(images)
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error getting product images: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get images: {str(e)}")
+
+@app.delete("/images/product/{product_id}")
+async def delete_product_image(
+    product_id: int,
+    image_url: str,
+    db: Session = Depends(get_db)
+):
+    """Delete a product image"""
+    try:
+        # Check if product exists
+        product = db.query(Product).filter(Product.id == product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        # Normalize image URL
+        if not image_url.startswith("/"):
+            image_url = f"/{image_url}"
+        
+        file_path = image_url[1:]  # Remove leading slash
+        
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Image file not found")
+        
+        # Check if it's the main image
+        if product.image_url == image_url:
+            # Find other images to set as main
+            product_dir = f"static/images/products/product_{product_id}"
+            other_images = [f for f in os.listdir(product_dir) 
+                            if os.path.isfile(os.path.join(product_dir, f)) 
+                            and f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))
+                            and f"/{os.path.join(product_dir, f)}" != image_url]
+            
+            if other_images:
+                # Set first alternative as main
+                product.image_url = f"/{os.path.join(product_dir, other_images[0])}"
+            else:
+                # No other images, clear the image URL
+                product.image_url = None
+            
+            db.commit()
+        
+        # Delete the file
+        os.remove(file_path)
+        
+        logger.info(f"🗑️ Deleted product {product_id} image: {image_url}")
+        
+        return {
+            "success": True,
+            "message": "Image deleted successfully"
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error deleting product image: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete image: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
