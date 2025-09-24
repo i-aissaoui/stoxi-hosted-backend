@@ -33,6 +33,19 @@ def get_algeria_time():
     """Get current time in Algeria timezone"""
     return datetime.now(ALGERIA_TZ)
 
+def validate_image_file(filename: str) -> bool:
+    """Validate if file is a supported image format"""
+    if not filename:
+        return False
+    
+    supported_extensions = (
+        '.png', '.jpg', '.jpeg', '.gif', '.bmp', 
+        '.webp', '.tiff', '.tif', '.svg', '.ico', 
+        '.heic', '.heif', '.avif', '.jfif', '.pjpeg', '.pjp'
+    )
+    
+    return filename.lower().endswith(supported_extensions)
+
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./hosted_shiakati.db")
 
@@ -604,6 +617,13 @@ async def receive_image_from_local(
 ):
     """Receive image file from local backend during sync"""
     try:
+        # Validate image file
+        if not validate_image_file(file.filename):
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid image format. Supported: PNG, JPG, JPEG, GIF, BMP, WEBP, TIFF, SVG, ICO, HEIC, HEIF, AVIF"
+            )
+        
         # Normalize the image path
         if image_path.startswith("/"):
             image_path = image_path[1:]
@@ -639,6 +659,13 @@ async def upload_category_image(
 ):
     """Upload image for category"""
     try:
+        # Validate image file
+        if not validate_image_file(file.filename):
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid image format. Supported: PNG, JPG, JPEG, GIF, BMP, WEBP, TIFF, SVG, ICO, HEIC, HEIF, AVIF"
+            )
+        
         # Check if category exists
         category = db.query(Category).filter(Category.id == category_id).first()
         if not category:
@@ -682,6 +709,13 @@ async def upload_product_image(
 ):
     """Upload image for product"""
     try:
+        # Validate image file
+        if not validate_image_file(file.filename):
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid image format. Supported: PNG, JPG, JPEG, GIF, BMP, WEBP, TIFF, SVG, ICO, HEIC, HEIF, AVIF"
+            )
+        
         # Check if product exists
         product = db.query(Product).filter(Product.id == product_id).first()
         if not product:
@@ -741,10 +775,11 @@ async def get_product_images(product_id: int, db: Session = Depends(get_db)):
         if not os.path.exists(product_dir):
             return {"success": True, "images": [], "count": 0}
         
-        # Get all image files
+        # Get all image files (support all common formats)
+        image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg', '.ico', '.heic', '.heif', '.avif')
         image_files = [f for f in os.listdir(product_dir) 
                       if os.path.isfile(os.path.join(product_dir, f)) and 
-                      f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))]
+                      f.lower().endswith(image_extensions)]
         
         # Create response
         images = []
@@ -793,9 +828,10 @@ async def delete_product_image(
         if product.image_url == image_url:
             # Find other images to set as main
             product_dir = f"static/images/products/product_{product_id}"
+            image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg', '.ico', '.heic', '.heif', '.avif')
             other_images = [f for f in os.listdir(product_dir) 
                             if os.path.isfile(os.path.join(product_dir, f)) 
-                            and f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))
+                            and f.lower().endswith(image_extensions)
                             and f"/{os.path.join(product_dir, f)}" != image_url]
             
             if other_images:
