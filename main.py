@@ -437,6 +437,47 @@ async def receive_product_update(product_data: Dict[str, Any], db: Session = Dep
         logger.error(f"❌ Error receiving product update: {e}")
         return {"success": False, "error": str(e)}
 
+@app.post("/sync/users")
+async def receive_user_update(user_data: Dict[str, Any], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Receive user update from local backend"""
+    global last_local_backend_ping
+    last_local_backend_ping = get_algeria_time()
+    
+    try:
+        user_id = user_data.get("id")
+        operation = user_data.get("operation", "update")
+        
+        if operation == "delete":
+            user = db.query(User).filter(User.id == user_id).first()
+            if user and user.username != "owner":  # Don't delete owner user
+                db.delete(user)
+        else:
+            existing = db.query(User).filter(User.id == user_id).first()
+            
+            if existing:
+                # Update existing user (except owner username)
+                for key, value in user_data.items():
+                    if key not in ["id", "operation"] and not (key == "username" and existing.username == "owner"):
+                        setattr(existing, key, value)
+                existing.updated_at = get_algeria_time()
+            else:
+                # Create new user
+                user_data.pop("operation", None)
+                user_data["created_at"] = get_algeria_time()
+                user_data["updated_at"] = get_algeria_time()
+                user = User(**user_data)
+                db.add(user)
+        
+        db.commit()
+        logger.info(f"👤 Received user update: {user_id}")
+        
+        return {"success": True, "message": "User updated", "timestamp": get_algeria_time().isoformat()}
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error receiving user update: {e}")
+        return {"success": False, "error": str(e)}
+
 @app.post("/sync/categories")
 async def receive_category_update(category_data: Dict[str, Any], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Receive category update from local backend"""
@@ -552,6 +593,41 @@ async def sync_status(db: Session = Depends(get_db)):
         "timezone": "Africa/Algiers",
         "mode": "passive_receiver"
     }
+
+# Image Transfer from Local Backend
+
+@app.post("/sync/upload-image")
+async def receive_image_from_local(
+    file: UploadFile = File(...),
+    image_path: str = Form(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Receive image file from local backend during sync"""
+    try:
+        # Normalize the image path
+        if image_path.startswith("/"):
+            image_path = image_path[1:]
+        
+        # Create directory structure
+        file_dir = os.path.dirname(image_path)
+        if file_dir:
+            os.makedirs(file_dir, exist_ok=True)
+        
+        # Save the file
+        with open(image_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        logger.info(f"📸 Received image from local backend: {image_path}")
+        
+        return {
+            "success": True,
+            "message": "Image received successfully",
+            "path": f"/{image_path}"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error receiving image: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to receive image: {str(e)}")
 
 # Image Upload Endpoints
 
