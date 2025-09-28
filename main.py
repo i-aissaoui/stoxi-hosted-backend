@@ -313,6 +313,27 @@ async def get_products(
         "count": len(result)
     }
 
+@app.get("/admin/export/users")
+async def export_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Admin export of all users (for reconciliation)."""
+    users = db.query(User).all()
+    return {
+        "success": True,
+        "data": [
+            {
+                "id": u.id,
+                "username": u.username,
+                "email": u.email,
+                "is_active": u.is_active,
+                "is_superuser": u.is_superuser,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+                "updated_at": u.updated_at.isoformat() if u.updated_at else None,
+            }
+            for u in users
+        ],
+        "count": len(users),
+    }
+
 @app.post("/orders")
 async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)):
     """Create order from website - queued for local backend"""
@@ -608,21 +629,25 @@ async def get_queued_orders(db: Session = Depends(get_db), current_user: User = 
 
 @app.post("/sync/mark-orders-synced")
 async def mark_orders_synced(order_ids: List[int], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Mark orders as synced to local backend"""
+    """After local backend confirms receipt, delete these orders from hosted.
+    This avoids duplication and keeps hosted queue clean.
+    """
     try:
         orders = db.query(Order).filter(Order.id.in_(order_ids)).all()
-        
+        count = len(orders)
         for order in orders:
-            order.synced_to_local = True
-        
+            db.delete(order)
         db.commit()
-        logger.info(f"✅ Marked {len(orders)} orders as synced")
-        
-        return {"success": True, "message": f"Marked {len(orders)} orders as synced", "timestamp": get_algeria_time().isoformat()}
-        
+        logger.info(f"🗑️ Deleted {count} orders after local sync confirmation")
+        return {
+            "success": True,
+            "message": f"Deleted {count} orders after sync confirmation",
+            "deleted": count,
+            "timestamp": get_algeria_time().isoformat(),
+        }
     except Exception as e:
         db.rollback()
-        logger.error(f"❌ Error marking orders as synced: {e}")
+        logger.error(f"❌ Error deleting orders after sync confirmation: {e}")
         return {"success": False, "error": str(e)}
 
 @app.get("/sync/queued-orders")
@@ -903,4 +928,4 @@ async def delete_product_image(
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8001))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("main:app", host="127.0.0.1", port=port, reload=False)
