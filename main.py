@@ -1,3 +1,25 @@
+# Helpers
+def _normalize_url_path(path: Optional[str]) -> Optional[str]:
+    """Ensure URLs use forward slashes and have a single leading slash."""
+    if not path:
+        return path
+    p = path.replace("\\", "/")
+    if not p.startswith("/"):
+        p = f"/{p}"
+    # Collapse any accidental double slashes except the leading one
+    while '//' in p[1:]:
+        p = p[0] + p[1:].replace('//', '/')
+    return p
+
+def _sha256_file(path: str) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
 """
 Hosted Backend v2 - Simplified (No Local Backend Calls)
 Local backend will connect to us instead!
@@ -19,6 +41,7 @@ import hashlib
 import secrets
 import pytz
 import shutil
+import hashlib
 from pathlib import Path
 
 # Configure logging
@@ -280,6 +303,8 @@ async def get_products(
     
     result = []
     for product in products:
+        # Normalize product image URL before serializing
+        normalized_image = _normalize_url_path(product.image_url)
         variants = [
             {
                 "id": v.id,
@@ -301,7 +326,7 @@ async def get_products(
                 "description": product.description,
                 "category_id": product.category_id,
                 "category_name": product.category.name if product.category else None,
-                "image_url": product.image_url,
+                "image_url": normalized_image,
                 "variants": variants,
                 "min_price": min(v["price"] for v in variants),
                 "max_price": max(v["price"] for v in variants)
@@ -312,6 +337,65 @@ async def get_products(
         "data": result,
         "count": len(result)
     }
+
+@app.get("/admin/images/manifest")
+async def images_manifest(current_user: User = Depends(get_current_user)):
+    """Return a manifest of hosted static images (categories & products) with checksums.
+    Used by local backend to verify and reconcile images.
+    """
+    base_dirs = [
+        ("categories", "static/images/categories"),
+        ("products", "static/images/products"),
+    ]
+    files = []
+    try:
+        for group, base in base_dirs:
+            if not os.path.exists(base):
+                continue
+            for root, _, filenames in os.walk(base):
+                for name in filenames:
+                    full_path = os.path.join(root, name)
+                    rel_path = os.path.relpath(full_path).replace("\\", "/")
+                    checksum = _sha256_file(full_path)
+                    stat = os.stat(full_path)
+                    files.append({
+                        "group": group,
+                        "path": rel_path,
+                        "url": _normalize_url_path(rel_path),
+                        "sha256": checksum,
+                        "size": stat.st_size,
+                        "mtime": int(stat.st_mtime),
+                    })
+        return {"success": True, "files": files, "count": len(files)}
+    except Exception as e:
+        logger.error(f"❌ Error building images manifest: {e}")
+        raise HTTPException(status_code=500, detail="Failed to build images manifest")
+
+@app.post("/admin/images/delete")
+async def delete_image_file(payload: Dict[str, Any], current_user: User = Depends(get_current_user)):
+    """Delete a static image file by relative path under static/.
+    Payload: {"path": "static/images/..."}
+    """
+    try:
+        path = payload.get("path")
+        if not path or not isinstance(path, str):
+            raise HTTPException(status_code=400, detail="Invalid path")
+        # Normalize and restrict to static directory
+        norm = path.replace("\\", "/").lstrip("/")
+        if not norm.startswith("static/"):
+            raise HTTPException(status_code=400, detail="Path must be under static/")
+        if ".." in norm:
+            raise HTTPException(status_code=400, detail="Invalid path traversal")
+        if not os.path.exists(norm):
+            return {"success": True, "deleted": False, "message": "File not found"}
+        os.remove(norm)
+        logger.info(f"🗑️ Deleted static file: {norm}")
+        return {"success": True, "deleted": True, "path": f"/{norm}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error deleting static file: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete file")
 
 @app.get("/admin/export/users")
 async def export_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -806,7 +890,7 @@ async def upload_product_image(
             shutil.copyfileobj(file.file, buffer)
         
         # Create image URL
-        image_url = f"/{file_path}"
+        image_url = _normalize_url_path(file_path)
         
         # Update product image URL if it's the first image or set_as_main is True
         if set_as_main or image_number == 1:
@@ -851,7 +935,7 @@ async def get_product_images(product_id: int, db: Session = Depends(get_db)):
         # Create response
         images = []
         for img in image_files:
-            image_url = f"/{os.path.join(product_dir, img)}"
+            image_url = _normalize_url_path(os.path.join(product_dir, img))
             is_main = (product.image_url == image_url)
             images.append({
                 "image_url": image_url,
@@ -927,5 +1011,5 @@ async def delete_product_image(
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8001))
-    uvicorn.run("main:app", host="127.0.0.1", port=port, reload=False)
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
