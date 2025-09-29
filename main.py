@@ -1,3 +1,6 @@
+from typing import Optional
+import hashlib
+
 # Helpers
 def _normalize_url_path(path: Optional[str]) -> Optional[str]:
     """Ensure URLs use forward slashes and have a single leading slash."""
