@@ -629,15 +629,28 @@ async def receive_product_update(product_data: Dict[str, Any], db: Session = Dep
                 existing.last_synced = get_algeria_time()
                 
                 # Update variants
+                # Helper: allow only attributes that exist on Variant model
+                def _filter_variant_fields(d: dict) -> dict:
+                    allowed = {}
+                    for k, v in d.items():
+                        if k == "id":
+                            allowed[k] = v
+                            continue
+                        if hasattr(Variant, k):
+                            allowed[k] = v
+                    return allowed
+
                 for variant_data in product_data.get("variants", []):
-                    existing_variant = db.query(Variant).filter(Variant.id == variant_data["id"]).first()
+                    vdata = _filter_variant_fields(variant_data)
+                    existing_variant = db.query(Variant).filter(Variant.id == vdata.get("id")).first()
                     if existing_variant:
-                        for key, value in variant_data.items():
+                        for key, value in vdata.items():
                             if key != "id":
                                 setattr(existing_variant, key, value)
                         existing_variant.last_synced = get_algeria_time()
                     else:
-                        variant = Variant(**variant_data, last_synced=get_algeria_time())
+                        vdata.pop("id", None)  # id is PK; ensure explicit when creating if needed
+                        variant = Variant(**vdata, last_synced=get_algeria_time())
                         db.add(variant)
                 # Delete variants that are not present in payload
                 payload_variant_ids = {v["id"] for v in product_data.get("variants", []) if "id" in v}
@@ -660,9 +673,21 @@ async def receive_product_update(product_data: Dict[str, Any], db: Session = Dep
                 db.flush()
                 
                 # Create variants
+                # Reuse the same field filter used in update branch
+                def _filter_variant_fields_create(d: dict) -> dict:
+                    allowed = {}
+                    for k, v in d.items():
+                        if k == "id":
+                            # ignore id when creating if provided
+                            continue
+                        if hasattr(Variant, k):
+                            allowed[k] = v
+                    return allowed
+
                 for variant_data in variants_data:
-                    variant_data["product_id"] = product.id
-                    variant = Variant(**variant_data, last_synced=get_algeria_time())
+                    vdata = _filter_variant_fields_create(variant_data)
+                    vdata["product_id"] = product.id
+                    variant = Variant(**vdata, last_synced=get_algeria_time())
                     db.add(variant)
         
         db.commit()
