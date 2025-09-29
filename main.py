@@ -374,6 +374,99 @@ async def images_manifest(current_user: User = Depends(get_current_user)):
         logger.error(f"❌ Error building images manifest: {e}")
         raise HTTPException(status_code=500, detail="Failed to build images manifest")
 
+@app.post("/admin/images/set-main")
+async def set_main_image(payload: Dict[str, Any], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Set a product's main image (image_url on product)."""
+    try:
+        product_id = payload.get("product_id")
+        image_url = payload.get("image_url")
+        if not isinstance(product_id, int) or not isinstance(image_url, str):
+            raise HTTPException(status_code=400, detail="Invalid payload")
+        product = db.query(Product).filter(Product.id == product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        product.image_url = _normalize_url_path(image_url)
+        db.commit()
+        return {"success": True, "image_url": product.image_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error setting main image: {e}")
+        raise HTTPException(status_code=500, detail="Failed to set main image")
+
+@app.get("/admin/export/categories")
+async def export_categories(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Export all categories for reconciliation."""
+    cats = db.query(Category).all()
+    return {
+        "success": True,
+        "data": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "description": c.description,
+                "image_url": c.image_url,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "last_synced": c.last_synced.isoformat() if getattr(c, "last_synced", None) else None,
+            }
+            for c in cats
+        ],
+        "count": len(cats),
+    }
+
+@app.get("/admin/export/products")
+async def export_products(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Export all products with variants for reconciliation."""
+    prods = db.query(Product).all()
+    variants = db.query(Variant).all()
+    var_by_pid: Dict[int, List[Variant]] = {}
+    for v in variants:
+        var_by_pid.setdefault(v.product_id, []).append(v)
+    def v_to_dict(v: Variant) -> Dict[str, Any]:
+        return {
+            "id": v.id,
+            "product_id": v.product_id,
+            "width": v.width,
+            "height": v.height,
+            "color": v.color,
+            "barcode": v.barcode,
+            "price": float(v.price) if v.price is not None else None,
+            "cost_price": float(v.cost_price) if v.cost_price is not None else None,
+            "quantity": v.quantity,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "promotion_price": float(v.promotion_price) if getattr(v, "promotion_price", None) is not None else None,
+        }
+    data = []
+    for p in prods:
+        data.append({
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "category_id": p.category_id,
+            "image_url": p.image_url,
+            "show_on_website": p.show_on_website,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+            "last_synced": p.last_synced.isoformat() if getattr(p, "last_synced", None) else None,
+            "variants": [v_to_dict(v) for v in var_by_pid.get(p.id, [])],
+        })
+    return {"success": True, "data": data, "count": len(data)}
+
+@app.delete("/sync/orders/{order_id}")
+async def delete_synced_order(order_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Delete an order after local backend confirms receipt."""
+    try:
+        order = db.query(Order).filter(Order.id == order_id).first()
+        if not order:
+            return {"success": True, "deleted": False}
+        db.delete(order)
+        db.commit()
+        return {"success": True, "deleted": True}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error deleting order {order_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete order")
+
 @app.post("/admin/images/delete")
 async def delete_image_file(payload: Dict[str, Any], current_user: User = Depends(get_current_user)):
     """Delete a static image file by relative path under static/.
@@ -546,6 +639,12 @@ async def receive_product_update(product_data: Dict[str, Any], db: Session = Dep
                     else:
                         variant = Variant(**variant_data, last_synced=get_algeria_time())
                         db.add(variant)
+                # Delete variants that are not present in payload
+                payload_variant_ids = {v["id"] for v in product_data.get("variants", []) if "id" in v}
+                to_delete = db.query(Variant).filter(Variant.product_id == existing.id).all()
+                for ev in to_delete:
+                    if ev.id not in payload_variant_ids:
+                        db.delete(ev)
             else:
                 # Create new product
                 # Validate category exists before insert to avoid FK error
@@ -1053,5 +1152,6 @@ async def delete_product_image(
 
 if __name__ == "__main__":
     import uvicorn
+    # Render requires binding to 0.0.0.0 and the PORT env var
     port = int(os.getenv("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
