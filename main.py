@@ -508,6 +508,11 @@ async def receive_product_update(product_data: Dict[str, Any], db: Session = Dep
     try:
         product_id = product_data.get("id")
         operation = product_data.get("operation", "update")
+        category_id = product_data.get("category_id")
+
+        # Normalize image_url if present (avoid backslashes)
+        if isinstance(product_data.get("image_url"), str):
+            product_data["image_url"] = _normalize_url_path(product_data["image_url"])  # type: ignore
         
         if operation == "delete":
             product = db.query(Product).filter(Product.id == product_id).first()
@@ -518,6 +523,13 @@ async def receive_product_update(product_data: Dict[str, Any], db: Session = Dep
             
             if existing:
                 # Update existing product
+                # If changing category, validate it exists first
+                if category_id is not None and category_id != existing.category_id:
+                    if not db.query(Category).filter(Category.id == category_id).first():
+                        msg = f"Cannot update product {product_id}: category_id {category_id} not found. Sync categories first."
+                        logger.error(msg)
+                        return {"success": False, "error": msg}, 400
+
                 for key, value in product_data.items():
                     if key not in ["id", "variants", "operation"]:
                         setattr(existing, key, value)
@@ -536,6 +548,12 @@ async def receive_product_update(product_data: Dict[str, Any], db: Session = Dep
                         db.add(variant)
             else:
                 # Create new product
+                # Validate category exists before insert to avoid FK error
+                if category_id is not None and not db.query(Category).filter(Category.id == category_id).first():
+                    msg = f"Cannot create product {product_id}: category_id {category_id} not found. Sync categories first."
+                    logger.error(msg)
+                    return {"success": False, "error": msg}, 400
+
                 variants_data = product_data.pop("variants", [])
                 product_data.pop("operation", None)
                 product = Product(**product_data, last_synced=get_algeria_time())
@@ -555,8 +573,29 @@ async def receive_product_update(product_data: Dict[str, Any], db: Session = Dep
         
     except Exception as e:
         db.rollback()
-        logger.error(f"❌ Error receiving product update: {e}")
-        return {"success": False, "error": str(e)}
+        try:
+            # Provide more context in logs and response
+            op = product_data.get("operation", "update")
+            pid = product_data.get("id")
+            cid = product_data.get("category_id")
+            logger.error(
+                "❌ Product sync failed | op=%s id=%s category_id=%s | %s: %s",
+                op,
+                pid,
+                cid,
+                e.__class__.__name__,
+                str(e),
+            )
+            # Check if this looks like an FK error and hint the fix
+            if "ForeignKeyViolation" in e.__class__.__name__ or "foreign key" in str(e).lower():
+                return {
+                    "success": False,
+                    "error": "Category missing on hosted",
+                    "details": f"category_id {cid} not found. Sync categories before products.",
+                }, 400
+        except Exception:
+            pass
+        return {"success": False, "error": str(e)}, 500
 
 @app.post("/sync/users")
 async def receive_user_update(user_data: Dict[str, Any], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
