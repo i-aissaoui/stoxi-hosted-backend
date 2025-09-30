@@ -315,7 +315,7 @@ async def get_delivery_fees(db: Session = Depends(get_db)):
     return {"success": True, "items": items, "count": len(items)}
 
 @app.post("/sync/delivery-fees")
-async def receive_delivery_fees_update(payload: Any, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def receive_delivery_fees_update(payload: Dict[str, Any] | List[Dict[str, Any]], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Upsert delivery fee rows from the local backend.
     Accepts either a single object or a list of objects with fields:
     { id?, wilaya_code, wilaya_name, home_delivery_fee, office_delivery_fee }
@@ -328,7 +328,7 @@ async def receive_delivery_fees_update(payload: Any, db: Session = Depends(get_d
         elif isinstance(payload, dict):
             items = [payload]
         else:
-            raise HTTPException(status_code=400, detail="Invalid payload")
+            raise HTTPException(status_code=400, detail="Invalid payload type (expected list or object)")
 
         upserted = 0
         for it in items:
@@ -615,6 +615,63 @@ async def delete_synced_order(order_id: int, db: Session = Depends(get_db), curr
         db.rollback()
         logger.error(f"❌ Error deleting order {order_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete order")
+
+@app.get("/sync/queued-orders")
+async def get_queued_orders(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Return orders that are not yet synced to the local backend, with items.
+    This is consumed by the local backend during manual/full sync.
+    """
+    try:
+        orders = db.query(Order).filter(Order.synced_to_local == False).order_by(Order.id.asc()).limit(200).all()
+        out = []
+        for o in orders:
+            out.append({
+                "id": o.id,
+                "customer_name": o.customer_name,
+                "customer_phone": o.customer_phone,
+                "total": float(o.total) if o.total is not None else 0,
+                "status": o.status,
+                "delivery_method": o.delivery_method,
+                "wilaya": o.wilaya,
+                "commune": o.commune,
+                "address": o.address,
+                "notes": o.notes,
+                "order_time": o.order_time.isoformat() if o.order_time else None,
+                "items": [
+                    {
+                        "variant_id": it.variant_id,
+                        "quantity": it.quantity,
+                        "price": float(it.price) if it.price is not None else 0,
+                    }
+                    for it in o.items
+                ],
+            })
+        return {"success": True, "orders": out, "count": len(out)}
+    except Exception as e:
+        logger.error(f"❌ Error listing queued orders: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list queued orders")
+
+@app.post("/sync/mark-orders-synced")
+async def mark_orders_synced(order_ids: List[int], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Mark provided hosted orders as synced to local (id list in body)."""
+    try:
+        if not isinstance(order_ids, list):
+            raise HTTPException(status_code=400, detail="Body must be a list of order IDs")
+        updated = 0
+        for oid in order_ids:
+            o = db.query(Order).filter(Order.id == int(oid)).first()
+            if not o:
+                continue
+            o.synced_to_local = True
+            updated += 1
+        db.commit()
+        return {"success": True, "updated": updated}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error marking orders synced: {e}")
+        raise HTTPException(status_code=500, detail="Failed to mark orders synced")
 
 @app.post("/admin/images/delete")
 async def delete_image_file(payload: Dict[str, Any], current_user: User = Depends(get_current_user)):
