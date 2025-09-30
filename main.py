@@ -645,15 +645,46 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
         
         # Add order items
         for item_data in order_data.get("items", []):
-            order_item = OrderItem(
-                order_id=order.id,
-                variant_id=item_data["variant_id"],
-                product_name=item_data.get("product_name", ""),
-                variant_details=json.dumps(item_data.get("variant_details", {})),
-                quantity=item_data["quantity"],
-                price=item_data["price"]
-            )
-            db.add(order_item)
+            # Defensive parsing to avoid KeyError on missing fields
+            try:
+                variant_id = item_data.get("variant_id")
+                qty = item_data.get("quantity", 1)
+                # Accept alternative price keys and default to 0 if missing
+                price_val = (
+                    item_data.get("price", None)
+                    if isinstance(item_data, dict) else None
+                )
+                if price_val is None:
+                    price_val = item_data.get("unit_price") if isinstance(item_data, dict) else None
+                if price_val is None:
+                    price_val = item_data.get("variant_price") if isinstance(item_data, dict) else None
+                if price_val is None:
+                    price_val = 0
+                # Coerce types
+                qty = int(qty) if qty is not None else 1
+                try:
+                    price_val = float(price_val)
+                except Exception:
+                    price_val = 0.0
+
+                details = item_data.get("variant_details", {})
+                if not isinstance(details, (dict, list)):
+                    # ensure json-serializable structure
+                    details = {"value": str(details)}
+
+                order_item = OrderItem(
+                    order_id=order.id,
+                    variant_id=variant_id,
+                    product_name=item_data.get("product_name", ""),
+                    variant_details=json.dumps(details),
+                    quantity=qty,
+                    price=price_val,
+                )
+                db.add(order_item)
+            except Exception as ie:
+                logger.error(f"Order item parse error: {ie} | item={item_data}")
+                # Skip invalid item but continue others
+                continue
         
         db.commit()
         
