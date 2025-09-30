@@ -267,78 +267,143 @@ async def health_check():
 
 @app.get("/categories")
 async def get_categories(db: Session = Depends(get_db)):
-    """Get categories for website"""
-    categories = db.query(Category).all()
+    """Get ONLY categories that have at least one visible product (show_on_website=1)."""
+    # Join with products and keep distinct categories that have visible products
+    categories = (
+        db.query(Category)
+        .join(Product, Product.category_id == Category.id)
+        .filter(Product.show_on_website == 1)
+        .distinct()
+        .all()
+    )
     
-    return {
-        "success": True,
-        "data": [
-            {
-                "id": cat.id,
-                "name": cat.name,
-                "description": cat.description,
-                "image_url": cat.image_url,
-                "created_at": cat.created_at.isoformat() if cat.created_at else None
-            }
-            for cat in categories
-        ],
-        "count": len(categories)
-    }
+    data = [
+        {
+            "id": cat.id,
+            "name": cat.name,
+            "description": cat.description,
+            "image_url": cat.image_url,
+            "created_at": cat.created_at.isoformat() if cat.created_at else None,
+        }
+        for cat in categories
+    ]
+    return {"success": True, "data": data, "count": len(data)}
 
 @app.get("/products")
 async def get_products(
     category_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None),
-    limit: int = Query(50),
+    page: int = Query(1, ge=1),
+    limit: int = Query(40, ge=1, le=200),
+    skip: Optional[int] = Query(None, ge=0),
+    include_stopped: bool = Query(False),
     db: Session = Depends(get_db)
 ):
-    """Get products for website"""
-    query = db.query(Product).filter(Product.show_on_website == 1)
-    
-    if category_id:
-        query = query.filter(Product.category_id == category_id)
-    
+    """Paginated products list for the website.
+    - Filters: category_id, search
+    - Pagination: page (1-based), limit (page size), skip (optional overrides page)
+    - Only returns products with show_on_website=1.
+    """
+    base_query = db.query(Product).filter(Product.show_on_website == 1)
+
+    if category_id is not None:
+        base_query = base_query.filter(Product.category_id == category_id)
+
     if search:
         search_term = f"%{search}%"
-        query = query.filter(Product.name.ilike(search_term))
-    
-    products = query.limit(limit).all()
-    
-    result = []
+        base_query = base_query.filter(Product.name.ilike(search_term))
+
+    # Total BEFORE pagination (for metadata)
+    total = base_query.count()
+
+    # Determine offset
+    offset = skip if skip is not None else (page - 1) * limit
+
+    # Order by newest first for better UX
+    page_q = base_query.order_by(Product.created_at.desc(), Product.id.desc()).offset(offset).limit(limit)
+    products = page_q.all()
+
+    data = []
     for product in products:
-        # Normalize product image URL before serializing
         normalized_image = _normalize_url_path(product.image_url)
-        variants = [
-            {
+        # Build variants; optionally include stopped variants for completeness
+        v_source = product.variants
+        payload_variants = []
+        for v in v_source:
+            if not include_stopped and v.stopped:
+                continue
+            payload_variants.append({
                 "id": v.id,
                 "price": float(v.price),
                 "quantity": float(v.quantity),
                 "width": v.width,
                 "height": v.height,
                 "color": v.color,
-                "available": float(v.quantity) > 0 and not v.stopped
-            }
-            for v in product.variants
-            if not v.stopped
-        ]
-        
-        if variants:
-            result.append({
+                "stopped": bool(v.stopped),
+                "available": float(v.quantity) > 0 and not v.stopped,
+            })
+        # Keep products that have at least one variant to display
+        if payload_variants:
+            prices = [pv["price"] for pv in payload_variants if pv.get("price") is not None]
+            data.append({
                 "id": product.id,
                 "name": product.name,
                 "description": product.description,
                 "category_id": product.category_id,
                 "category_name": product.category.name if product.category else None,
                 "image_url": normalized_image,
-                "variants": variants,
-                "min_price": min(v["price"] for v in variants),
-                "max_price": max(v["price"] for v in variants)
+                "variants": payload_variants,
+                "min_price": min(prices) if prices else None,
+                "max_price": max(prices) if prices else None,
             })
-    
+
+    pages = (total + limit - 1) // limit if limit else 1
+    current_page = (offset // limit) + 1 if limit else 1
     return {
         "success": True,
-        "data": result,
-        "count": len(result)
+        "data": data,
+        "count": len(data),
+        "total": total,
+        "page": current_page,
+        "page_size": limit,
+        "pages": pages,
+        "has_next": current_page < pages,
+        "has_prev": current_page > 1,
+    }
+
+@app.get("/products/{product_id}")
+async def get_product_detail(product_id: int, db: Session = Depends(get_db)):
+    """Product detail with variants for the website."""
+    product = db.query(Product).filter(Product.id == product_id, Product.show_on_website == 1).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    normalized_image = _normalize_url_path(product.image_url)
+    variants = [
+        {
+            "id": v.id,
+            "price": float(v.price),
+            "quantity": float(v.quantity),
+            "width": v.width,
+            "height": v.height,
+            "color": v.color,
+            "stopped": bool(v.stopped),
+            "available": float(v.quantity) > 0 and not v.stopped,
+        }
+        for v in product.variants
+        if not v.stopped
+    ]
+    return {
+        "success": True,
+        "data": {
+            "id": product.id,
+            "name": product.name,
+            "description": product.description,
+            "category_id": product.category_id,
+            "category_name": product.category.name if product.category else None,
+            "image_url": normalized_image,
+            "variants": variants,
+        }
     }
 
 @app.get("/admin/images/manifest")
