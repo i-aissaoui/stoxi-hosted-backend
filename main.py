@@ -180,6 +180,15 @@ class User(Base):
     created_at = Column(DateTime, default=get_algeria_time)
     updated_at = Column(DateTime, default=get_algeria_time, onupdate=get_algeria_time)
 
+class DeliveryFee(Base):
+    __tablename__ = "delivery_fees"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    wilaya_code = Column(Integer, nullable=False, index=True)
+    wilaya_name = Column(Text, nullable=False)
+    home_delivery_fee = Column(Numeric(10, 2), nullable=False)
+    office_delivery_fee = Column(Numeric(10, 2))
+
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -288,6 +297,22 @@ async def get_categories(db: Session = Depends(get_db)):
         for cat in categories
     ]
     return {"success": True, "data": data, "count": len(data)}
+
+@app.get("/delivery-fees")
+async def get_delivery_fees(db: Session = Depends(get_db)):
+    """Public endpoint for the website to fetch delivery fees."""
+    fees = db.query(DeliveryFee).all()
+    items = [
+        {
+            "id": f.id,
+            "wilaya_code": f.wilaya_code,
+            "wilaya_name": f.wilaya_name,
+            "home_delivery_fee": float(f.home_delivery_fee) if f.home_delivery_fee is not None else None,
+            "office_delivery_fee": float(f.office_delivery_fee) if f.office_delivery_fee is not None else None,
+        }
+        for f in fees
+    ]
+    return {"success": True, "items": items, "count": len(items)}
 
 @app.get("/products")
 async def get_products(
@@ -900,6 +925,52 @@ async def receive_category_update(category_data: Dict[str, Any], db: Session = D
         db.rollback()
         logger.error(f"❌ Error receiving category update: {e}")
         return {"success": False, "error": str(e)}
+
+@app.post("/sync/delivery-fees")
+async def receive_delivery_fees_update(payload: Any, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Upsert delivery fee rows from the local backend.
+    Accepts either a single object or a list of objects with fields:
+    { id?, wilaya_code, wilaya_name, home_delivery_fee, office_delivery_fee }
+    """
+    try:
+        items: List[Dict[str, Any]]
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = [payload]
+        else:
+            raise HTTPException(status_code=400, detail="Invalid payload")
+
+        upserted = 0
+        for it in items:
+            code = it.get("wilaya_code")
+            name = it.get("wilaya_name")
+            if code is None or name is None:
+                continue
+            fee = db.query(DeliveryFee).filter(DeliveryFee.wilaya_code == code).first()
+            if fee:
+                fee.wilaya_name = name
+                if it.get("home_delivery_fee") is not None:
+                    fee.home_delivery_fee = it["home_delivery_fee"]
+                if it.get("office_delivery_fee") is not None:
+                    fee.office_delivery_fee = it["office_delivery_fee"]
+            else:
+                fee = DeliveryFee(
+                    wilaya_code=code,
+                    wilaya_name=name,
+                    home_delivery_fee=it.get("home_delivery_fee", 0),
+                    office_delivery_fee=it.get("office_delivery_fee"),
+                )
+                db.add(fee)
+            upserted += 1
+        db.commit()
+        return {"success": True, "upserted": upserted}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error receiving delivery fees update: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update delivery fees")
 
 @app.get("/sync/orders")
 async def get_queued_orders(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
