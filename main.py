@@ -314,6 +314,64 @@ async def get_delivery_fees(db: Session = Depends(get_db)):
     ]
     return {"success": True, "items": items, "count": len(items)}
 
+@app.post("/sync/delivery-fees")
+async def receive_delivery_fees_update(payload: Any, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Upsert delivery fee rows from the local backend.
+    Accepts either a single object or a list of objects with fields:
+    { id?, wilaya_code, wilaya_name, home_delivery_fee, office_delivery_fee }
+    """
+    try:
+        # Normalize payload to a list
+        items: List[Dict[str, Any]]
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = [payload]
+        else:
+            raise HTTPException(status_code=400, detail="Invalid payload")
+
+        upserted = 0
+        for it in items:
+            code = it.get("wilaya_code")
+            name = it.get("wilaya_name")
+            if code is None or name is None:
+                continue
+            fee = db.query(DeliveryFee).filter(DeliveryFee.wilaya_code == code).first()
+            if fee:
+                fee.wilaya_name = name
+                if it.get("home_delivery_fee") is not None:
+                    try:
+                        fee.home_delivery_fee = float(it["home_delivery_fee"])  # type: ignore
+                    except Exception:
+                        pass
+                if it.get("office_delivery_fee") is not None:
+                    try:
+                        fee.office_delivery_fee = float(it["office_delivery_fee"])  # type: ignore
+                    except Exception:
+                        pass
+            else:
+                try:
+                    hdf = it.get("home_delivery_fee", 0)
+                    odf = it.get("office_delivery_fee")
+                    fee = DeliveryFee(
+                        wilaya_code=int(code),
+                        wilaya_name=str(name),
+                        home_delivery_fee=float(hdf) if hdf is not None else 0,
+                        office_delivery_fee=float(odf) if odf is not None else None,
+                    )
+                    db.add(fee)
+                except Exception:
+                    continue
+            upserted += 1
+        db.commit()
+        return {"success": True, "upserted": upserted}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error receiving delivery fees update: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update delivery fees")
+
 @app.get("/products")
 async def get_products(
     category_id: Optional[int] = Query(None),
@@ -521,11 +579,12 @@ async def export_products(db: Session = Depends(get_db), current_user: User = De
             "height": v.height,
             "color": v.color,
             "barcode": v.barcode,
-            "price": float(v.price) if v.price is not None else None,
-            "cost_price": float(v.cost_price) if v.cost_price is not None else None,
-            "quantity": v.quantity,
+            "price": float(v.price) if getattr(v, "price", None) is not None else None,
+            # Hosted Variant may not have these optional fields; guard with getattr
+            "cost_price": float(getattr(v, "cost_price")) if getattr(v, "cost_price", None) is not None else None,
+            "quantity": float(getattr(v, "quantity", 0)) if getattr(v, "quantity", None) is not None else 0,
             "created_at": v.created_at.isoformat() if v.created_at else None,
-            "promotion_price": float(v.promotion_price) if getattr(v, "promotion_price", None) is not None else None,
+            "promotion_price": float(getattr(v, "promotion_price")) if getattr(v, "promotion_price", None) is not None else None,
         }
     data = []
     for p in prods:
