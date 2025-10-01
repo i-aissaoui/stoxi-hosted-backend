@@ -750,12 +750,17 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
                     customer.name = incoming_name
                     db.flush()
         
-        # Create order with Algeria time
+        # Create order with Algeria time (total will be finalized after items loop)
+        incoming_total = order_data.get("total", 0)
+        try:
+            incoming_total = float(incoming_total or 0)
+        except Exception:
+            incoming_total = 0.0
         order = Order(
             customer_id=customer.id if customer else None,
             customer_name=incoming_name,
             customer_phone=incoming_phone,
-            total=order_data.get("total", 0),
+            total=incoming_total,
             delivery_method=order_data.get("delivery_method", "home_delivery"),
             wilaya=order_data.get("wilaya", ""),
             commune=order_data.get("commune", ""),
@@ -768,7 +773,8 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
         db.add(order)
         db.flush()
         
-        # Add order items
+        # Add order items and compute total when prices are missing
+        computed_total = 0.0
         for item_data in order_data.get("items", []):
             # Defensive parsing to avoid KeyError on missing fields
             try:
@@ -784,7 +790,12 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
                 if price_val is None:
                     price_val = item_data.get("variant_price") if isinstance(item_data, dict) else None
                 if price_val is None:
-                    price_val = 0
+                    # Try to fetch variant price from DB when not provided
+                    try:
+                        v = db.query(Variant).filter(Variant.id == int(variant_id)).first() if variant_id else None
+                        price_val = float(v.price) if v and getattr(v, "price", None) is not None else 0
+                    except Exception:
+                        price_val = 0
                 # Coerce types
                 qty = int(qty) if qty is not None else 1
                 try:
@@ -806,15 +817,26 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
                     price=price_val,
                 )
                 db.add(order_item)
+                # Accumulate total
+                computed_total += (price_val or 0) * (qty or 0)
             except Exception as ie:
                 logger.error(f"Order item parse error: {ie} | item={item_data}")
                 # Skip invalid item but continue others
                 continue
-        
+
+        # Commit items
         db.commit()
-        
+
+        # Finalize total if missing/zero: prefer computed from items
+        try:
+            if (order.total or 0) == 0 and computed_total > 0:
+                order.total = computed_total
+                db.commit()
+        except Exception:
+            pass
+
         logger.info(f"📝 Created website order {order.id} at {get_algeria_time()}")
-        
+
         return {
             "success": True,
             "message": "Order created successfully",
