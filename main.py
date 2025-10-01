@@ -152,6 +152,8 @@ class Order(Base):
     order_time = Column(DateTime, default=get_algeria_time)
     synced_to_local = Column(Boolean, default=False)
     local_order_id = Column(Integer)
+    # New: delivery fee stored to allow correct totals and syncing
+    delivery_fee = Column(Numeric(10, 2))
     
     items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
@@ -191,6 +193,21 @@ class DeliveryFee(Base):
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+# Ensure new columns exist on existing deployments (best-effort)
+try:
+    with engine.connect() as conn:
+        # Postgres supports IF NOT EXISTS; SQLite will ignore a failing clause, so we try-catch
+        conn.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2)")
+        conn.commit()
+except Exception:
+    try:
+        # Fallback: try simple ADD COLUMN (may fail if already exists)
+        with engine.connect() as conn:
+            conn.execute("ALTER TABLE orders ADD COLUMN delivery_fee NUMERIC(10,2)")
+            conn.commit()
+    except Exception:
+        pass
 
 # Dependency
 def get_db():
@@ -630,6 +647,7 @@ async def get_queued_orders(db: Session = Depends(get_db), current_user: User = 
                 "customer_name": o.customer_name,
                 "customer_phone": o.customer_phone,
                 "total": float(o.total) if o.total is not None else 0,
+                "delivery_fee": float(o.delivery_fee) if getattr(o, 'delivery_fee', None) is not None else None,
                 "status": o.status,
                 "delivery_method": o.delivery_method,
                 "wilaya": o.wilaya,
@@ -756,6 +774,13 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
             incoming_total = float(incoming_total or 0)
         except Exception:
             incoming_total = 0.0
+        # Capture delivery_fee from payload if provided
+        try:
+            incoming_delivery_fee = order_data.get("delivery_fee", None)
+            incoming_delivery_fee = float(incoming_delivery_fee) if incoming_delivery_fee is not None else None
+        except Exception:
+            incoming_delivery_fee = None
+
         order = Order(
             customer_id=customer.id if customer else None,
             customer_name=incoming_name,
@@ -767,7 +792,8 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
             address=order_data.get("address", ""),
             notes=order_data.get("notes", "Order from website"),
             order_time=get_algeria_time(),
-            synced_to_local=False
+            synced_to_local=False,
+            delivery_fee=incoming_delivery_fee
         )
         
         db.add(order)
