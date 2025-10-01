@@ -592,6 +592,27 @@ async def get_product_detail(product_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Product not found")
 
     normalized_image = _normalize_url_path(product.image_url)
+    # Build images list (prefer DB ProductImage, fallback to filesystem)
+    try:
+        images_db = [
+            _normalize_url_path(pi.url)
+            for pi in sorted(getattr(product, 'images', []) or [], key=lambda x: (getattr(x, 'sort_order', 0) or 0, getattr(x, 'id', 0)))
+            if getattr(pi, 'url', None)
+        ]
+    except Exception:
+        images_db = []
+    images_fs = _list_product_images(product.id)
+    images = images_db or images_fs
+    # Determine main image: Product.image_url -> first DB is_main -> first available
+    main_from_db = None
+    try:
+        flagged = [pi for pi in (getattr(product, 'images', []) or []) if getattr(pi, 'is_main', False) and getattr(pi, 'url', None)]
+        if flagged:
+            main_from_db = _normalize_url_path(flagged[0].url)
+    except Exception:
+        main_from_db = None
+    main_image = normalized_image or main_from_db or (images[0] if images else None)
+
     variants = [
         {
             "id": v.id,
