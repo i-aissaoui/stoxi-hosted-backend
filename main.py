@@ -656,15 +656,23 @@ async def get_queued_orders(db: Session = Depends(get_db), current_user: User = 
                 "notes": o.notes,
                 "order_time": o.order_time.isoformat() if o.order_time else None,
                 "items": [
-                    {
-                        "variant_id": it.variant_id,
-                        "quantity": it.quantity,
-                        "price": float(it.price) if it.price is not None else 0,
-                        # Forward variant details to help local resolve variants when IDs differ
-                        "variant_details": _safe_parse_json(it.variant_details),
-                        # Also include product name for matching
-                        "product_name": it.product_name,
-                    }
+                    (
+                        (lambda _it: (
+                            {
+                                "variant_id": _it.variant_id,
+                                "quantity": _it.quantity,
+                                "price": float(_it.price) if _it.price is not None else 0,
+                                # Forward variant details to help local resolve variants when IDs differ
+                                "variant_details": (lambda _raw: (
+                                    (lambda _parsed: _parsed if isinstance(_parsed, dict) else None)(
+                                        (lambda: __import__("json").loads(_raw))() if isinstance(_raw, str) else (_raw if isinstance(_raw, dict) else None)
+                                    )
+                                ))(getattr(_it, 'variant_details', None)),
+                                # Also include product name for matching
+                                "product_name": getattr(_it, 'product_name', None),
+                            }
+                        ))(it)
+                    )
                     for it in o.items
                 ],
             })
