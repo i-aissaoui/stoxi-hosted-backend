@@ -265,24 +265,31 @@ def _list_product_images(product_id: int) -> List[str]:
     try:
         base_dir = os.path.join("static", "images", "products")
         urls: List[str] = []
-        # Preferred per-product subdirectory
-        dir_path = os.path.join(base_dir, str(product_id))
-        if os.path.isdir(dir_path):
-            for root, _, files in os.walk(dir_path):
-                for name in files:
-                    if not validate_image_file(name):
-                        continue
-                    rel_path = os.path.relpath(os.path.join(root, name)).replace("\\", "/")
-                    urls.append(_normalize_url_path(rel_path))
-        else:
-            # Fallback: flat directory with product-id prefix
-            if os.path.isdir(base_dir):
-                for name in os.listdir(base_dir):
-                    if not validate_image_file(name):
-                        continue
-                    if name.startswith(f"{product_id}_") or name.startswith(f"{product_id}-"):
-                        rel_path = f"static/images/products/{name}"
+        # Preferred per-product subdirectory (support both "<id>" and legacy "product_<id>")
+        dir_paths = [
+            os.path.join(base_dir, str(product_id)),
+            os.path.join(base_dir, f"product_{product_id}")
+        ]
+        for dir_path in dir_paths:
+            if os.path.isdir(dir_path):
+                for root, _, files in os.walk(dir_path):
+                    for name in files:
+                        if not validate_image_file(name):
+                            continue
+                        rel_path = os.path.relpath(os.path.join(root, name)).replace("\\", "/")
                         urls.append(_normalize_url_path(rel_path))
+
+        # Fallback: flat directory with product-id prefix
+        if os.path.isdir(base_dir):
+            for name in os.listdir(base_dir):
+                if not validate_image_file(name):
+                    continue
+                if (
+                    name.startswith(f"{product_id}_") or name.startswith(f"{product_id}-") or
+                    name.startswith(f"product_{product_id}_") or name.startswith(f"product-{product_id}-")
+                ):
+                    rel_path = f"static/images/products/{name}"
+                    urls.append(_normalize_url_path(rel_path))
         # Stable order, unique
         urls = sorted(set(urls))
         return urls
