@@ -891,11 +891,16 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
         # Commit items
         db.commit()
 
-        # Finalize total if missing/zero: prefer computed from items
+        # Finalize/normalize total: enforce sum(items) + delivery_fee
         try:
-            if (order.total or 0) == 0 and computed_total > 0:
-                order.total = computed_total
-                db.commit()
+            normalized_total = float(computed_total or 0)
+            if incoming_delivery_fee is not None:
+                try:
+                    normalized_total += float(incoming_delivery_fee)
+                except Exception:
+                    pass
+            order.total = normalized_total
+            db.commit()
         except Exception:
             pass
 
