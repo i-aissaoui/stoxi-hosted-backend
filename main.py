@@ -109,6 +109,20 @@ class Product(Base):
     
     category = relationship("Category", back_populates="products")
     variants = relationship("Variant", back_populates="product")
+    # New: gallery images for products
+    images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
+
+class ProductImage(Base):
+    __tablename__ = "product_images"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), index=True, nullable=False)
+    url = Column(Text, nullable=False)
+    is_main = Column(Boolean, default=False)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=get_algeria_time)
+
+    product = relationship("Product", back_populates="images")
 
 class Variant(Base):
     __tablename__ = "variants"
@@ -241,6 +255,39 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Global variables
 last_local_backend_ping = None
+# ---------- Images helpers ----------
+def _list_product_images(product_id: int) -> List[str]:
+    """List available image URLs for a product under static/images/products.
+
+    Preferred structure: static/images/products/<product_id>/*.{img}
+    Fallback: flat files named with a product id prefix like "<product_id>_*.jpg".
+    """
+    try:
+        base_dir = os.path.join("static", "images", "products")
+        urls: List[str] = []
+        # Preferred per-product subdirectory
+        dir_path = os.path.join(base_dir, str(product_id))
+        if os.path.isdir(dir_path):
+            for root, _, files in os.walk(dir_path):
+                for name in files:
+                    if not validate_image_file(name):
+                        continue
+                    rel_path = os.path.relpath(os.path.join(root, name)).replace("\\", "/")
+                    urls.append(_normalize_url_path(rel_path))
+        else:
+            # Fallback: flat directory with product-id prefix
+            if os.path.isdir(base_dir):
+                for name in os.listdir(base_dir):
+                    if not validate_image_file(name):
+                        continue
+                    if name.startswith(f"{product_id}_") or name.startswith(f"{product_id}-"):
+                        rel_path = f"static/images/products/{name}"
+                        urls.append(_normalize_url_path(rel_path))
+        # Stable order, unique
+        urls = sorted(set(urls))
+        return urls
+    except Exception:
+        return []
 
 # Authentication setup
 security = HTTPBearer()
@@ -281,6 +328,48 @@ async def root(db: Session = Depends(get_db)):
         "products": db.query(Product).count(),
         "pending_orders": db.query(Order).filter(Order.synced_to_local == False).count()
     }
+
+@app.get("/product-images/list/{product_id}")
+async def list_product_images(product_id: int, db: Session = Depends(get_db)):
+    """Return gallery images for a product.
+
+    Priority:
+    1) DB-backed ProductImage records (sorted by sort_order, id)
+    2) Filesystem scan under static/images/products (fallback)
+    """
+    try:
+        product = db.query(Product).filter(Product.id == product_id).first()
+        if not product:
+            return {"success": True, "images": [], "count": 0}
+
+        # DB-backed
+        out = []
+        try:
+            records = (
+                db.query(ProductImage)
+                .filter(ProductImage.product_id == product_id)
+                .order_by(ProductImage.sort_order.asc(), ProductImage.id.asc())
+                .all()
+            )
+            for r in records:
+                out.append({
+                    "id": r.id,
+                    "url": _normalize_url_path(r.url),
+                    "is_main": bool(getattr(r, 'is_main', False)),
+                    "sort_order": getattr(r, 'sort_order', 0) or 0,
+                })
+        except Exception:
+            out = []
+
+        # Fallback to filesystem if DB empty
+        if not out:
+            fs_urls = _list_product_images(product_id)
+            out = [{"id": None, "url": u, "is_main": False, "sort_order": i} for i, u in enumerate(fs_urls)]
+
+        return {"success": True, "images": out, "count": len(out)}
+    except Exception as e:
+        logger.error(f"❌ Error listing product images for {product_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list product images")
 
 @app.get("/health")
 async def health_check():
@@ -426,6 +515,27 @@ async def get_products(
     data = []
     for product in products:
         normalized_image = _normalize_url_path(product.image_url)
+        # Prefer DB-stored images; fallback to filesystem scan
+        images_db = []
+        try:
+            images_db = [
+                _normalize_url_path(pi.url)
+                for pi in sorted(getattr(product, 'images', []) or [], key=lambda x: (getattr(x, 'sort_order', 0) or 0, getattr(x, 'id', 0)))
+                if getattr(pi, 'url', None)
+            ]
+        except Exception:
+            images_db = []
+        images_fs = _list_product_images(product.id)
+        images = images_db or images_fs
+        # Main image priority: Product.image_url -> first DB is_main -> first available
+        main_from_db = None
+        try:
+            flagged = [pi for pi in (getattr(product, 'images', []) or []) if getattr(pi, 'is_main', False) and getattr(pi, 'url', None)]
+            if flagged:
+                main_from_db = _normalize_url_path(flagged[0].url)
+        except Exception:
+            main_from_db = None
+        main_image = normalized_image or main_from_db or (images[0] if images else None)
         # Build variants; optionally include stopped variants for completeness
         v_source = product.variants
         payload_variants = []
@@ -445,13 +555,16 @@ async def get_products(
         # Keep products that have at least one variant to display
         if payload_variants:
             prices = [pv["price"] for pv in payload_variants if pv.get("price") is not None]
+            images = _list_product_images(product.id)
+            main_image = normalized_image or (images[0] if images else None)
             data.append({
                 "id": product.id,
                 "name": product.name,
                 "description": product.description,
                 "category_id": product.category_id,
                 "category_name": product.category.name if product.category else None,
-                "image_url": normalized_image,
+                "image_url": main_image,
+                "images": images,
                 "variants": payload_variants,
                 "min_price": min(prices) if prices else None,
                 "max_price": max(prices) if prices else None,
@@ -501,7 +614,8 @@ async def get_product_detail(product_id: int, db: Session = Depends(get_db)):
             "description": product.description,
             "category_id": product.category_id,
             "category_name": product.category.name if product.category else None,
-            "image_url": normalized_image,
+            "image_url": main_image,
+            "images": images,
             "variants": variants,
         }
     }
@@ -559,6 +673,118 @@ async def set_main_image(payload: Dict[str, Any], db: Session = Depends(get_db),
         db.rollback()
         logger.error(f"❌ Error setting main image: {e}")
         raise HTTPException(status_code=500, detail="Failed to set main image")
+
+# -------- Product images admin (DB-backed gallery) --------
+@app.post("/admin/products/{product_id}/images")
+async def add_product_image(
+    product_id: int,
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Add an image record for a product. Body: {url, is_main?, sort_order?}
+    If is_main=true, marks all other images as not main and updates Product.image_url too.
+    """
+    try:
+        product = db.query(Product).filter(Product.id == product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        url = payload.get("url")
+        if not isinstance(url, str) or not url:
+            raise HTTPException(status_code=400, detail="Missing url")
+        norm_url = _normalize_url_path(url)
+        is_main = bool(payload.get("is_main", False))
+        sort_order = int(payload.get("sort_order", 0) or 0)
+
+        if is_main:
+            # Clear main flags
+            for pi in product.images:
+                pi.is_main = False
+            product.image_url = norm_url
+
+        rec = ProductImage(product_id=product_id, url=norm_url, is_main=is_main, sort_order=sort_order)
+        db.add(rec)
+        db.commit()
+        db.refresh(rec)
+        return {"success": True, "image": {"id": rec.id, "url": rec.url, "is_main": rec.is_main, "sort_order": rec.sort_order}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error adding product image: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add product image")
+
+@app.post("/admin/products/{product_id}/images/set-main")
+async def set_main_product_image(
+    product_id: int,
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set a specific ProductImage as main. Body may contain {image_id} or {url}."""
+    try:
+        product = db.query(Product).filter(Product.id == product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        image_id = payload.get("image_id")
+        url = payload.get("url")
+        rec = None
+        if image_id is not None:
+            rec = db.query(ProductImage).filter(ProductImage.id == int(image_id), ProductImage.product_id == product_id).first()
+        elif url:
+            norm_url = _normalize_url_path(url)
+            rec = db.query(ProductImage).filter(ProductImage.product_id == product_id, ProductImage.url == norm_url).first()
+        if not rec:
+            raise HTTPException(status_code=404, detail="Image not found for product")
+
+        # Clear other mains and set this one
+        for pi in product.images:
+            pi.is_main = (pi.id == rec.id)
+        product.image_url = _normalize_url_path(rec.url)
+        db.commit()
+        return {"success": True, "image_url": product.image_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error setting main product image: {e}")
+        raise HTTPException(status_code=500, detail="Failed to set main product image")
+
+@app.delete("/admin/products/{product_id}/images/{image_id}")
+async def delete_product_image(
+    product_id: int,
+    image_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a product image record. If it was main, clears Product.image_url or sets to next available image."""
+    try:
+        product = db.query(Product).filter(Product.id == product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        rec = db.query(ProductImage).filter(ProductImage.id == image_id, ProductImage.product_id == product_id).first()
+        if not rec:
+            return {"success": True, "deleted": False}
+        was_main = bool(rec.is_main)
+        db.delete(rec)
+        db.flush()
+        if was_main:
+            # Choose next main from remaining images
+            remaining = db.query(ProductImage).filter(ProductImage.product_id == product_id).order_by(ProductImage.is_main.desc(), ProductImage.sort_order.asc(), ProductImage.id.asc()).all()
+            next_main = remaining[0] if remaining else None
+            if next_main:
+                next_main.is_main = True
+                product.image_url = _normalize_url_path(next_main.url)
+            else:
+                product.image_url = None
+        db.commit()
+        return {"success": True, "deleted": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error deleting product image: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete product image")
 
 @app.get("/admin/export/categories")
 async def export_categories(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
