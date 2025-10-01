@@ -660,6 +660,10 @@ async def get_queued_orders(db: Session = Depends(get_db), current_user: User = 
                         "variant_id": it.variant_id,
                         "quantity": it.quantity,
                         "price": float(it.price) if it.price is not None else 0,
+                        # Forward variant details to help local resolve variants when IDs differ
+                        "variant_details": _safe_parse_json(it.variant_details),
+                        # Also include product name for matching
+                        "product_name": it.product_name,
                     }
                     for it in o.items
                 ],

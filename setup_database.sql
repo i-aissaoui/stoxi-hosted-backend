@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS public.orders (
     wilaya TEXT,
     commune TEXT,
     address TEXT,
+    delivery_fee NUMERIC(10, 2),
     notes TEXT,
     order_time TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     synced_to_local BOOLEAN DEFAULT FALSE,
@@ -130,6 +131,10 @@ CREATE TABLE IF NOT EXISTS public.delivery_fees (
 -- ===================================================================
 -- CREATE INDEXES FOR PERFORMANCE
 -- ===================================================================
+
+-- Safety migration for existing databases (idempotent)
+ALTER TABLE IF EXISTS public.orders
+    ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2);
 
 -- Categories indexes
 CREATE INDEX IF NOT EXISTS idx_categories_name ON public.categories(name);
