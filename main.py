@@ -726,26 +726,35 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
     global last_local_backend_ping
     
     try:
-        # Create customer if needed
+        # Normalize incoming fields (accept both customer_phone and phone_number)
+        incoming_name = (order_data.get("customer_name") or "").strip()
+        incoming_phone = (order_data.get("customer_phone") or order_data.get("phone_number") or "").strip()
+
+        # Create or link customer by phone (unicity)
         customer = None
-        if order_data.get("customer_phone"):
+        if incoming_phone:
             customer = db.query(Customer).filter(
-                Customer.phone_number == order_data["customer_phone"]
+                Customer.phone_number == incoming_phone
             ).first()
-            
+
             if not customer:
                 customer = Customer(
-                    name=order_data.get("customer_name", ""),
-                    phone_number=order_data["customer_phone"]
+                    name=incoming_name,
+                    phone_number=incoming_phone
                 )
                 db.add(customer)
                 db.flush()
+            else:
+                # If we have a better name now, update empty/generic names
+                if incoming_name and (not customer.name or customer.name.strip() in {"", "Guest", "Website Guest", "-"}):
+                    customer.name = incoming_name
+                    db.flush()
         
         # Create order with Algeria time
         order = Order(
             customer_id=customer.id if customer else None,
-            customer_name=order_data.get("customer_name", ""),
-            customer_phone=order_data.get("customer_phone", ""),
+            customer_name=incoming_name,
+            customer_phone=incoming_phone,
             total=order_data.get("total", 0),
             delivery_method=order_data.get("delivery_method", "home_delivery"),
             wilaya=order_data.get("wilaya", ""),
