@@ -841,15 +841,41 @@ async def create_order(order_data: Dict[str, Any], db: Session = Depends(get_db)
                 except Exception:
                     price_val = 0.0
 
-                details = item_data.get("variant_details", {})
-                if not isinstance(details, (dict, list)):
-                    # ensure json-serializable structure
-                    details = {"value": str(details)}
+                # Ensure we carry rich details to help local resolve variants
+                details = item_data.get("variant_details", {}) or {}
+                if isinstance(details, str):
+                    try:
+                        details = json.loads(details)
+                    except Exception:
+                        details = {}
+                if not isinstance(details, dict):
+                    details = {}
+
+                # Enrich details and product_name from Variant if missing
+                v_for_details = None
+                try:
+                    if variant_id:
+                        v_for_details = db.query(Variant).filter(Variant.id == int(variant_id)).first()
+                except Exception:
+                    v_for_details = None
+                if v_for_details is not None:
+                    # Fill attributes if absent
+                    details.setdefault("barcode", getattr(v_for_details, "barcode", None))
+                    details.setdefault("width", getattr(v_for_details, "width", None))
+                    details.setdefault("height", getattr(v_for_details, "height", None))
+                    details.setdefault("color", getattr(v_for_details, "color", None))
+                    # Also store product_name inside details for redundancy
+                    if getattr(v_for_details, "product", None):
+                        details.setdefault("product_name", getattr(v_for_details.product, "name", None))
 
                 order_item = OrderItem(
                     order_id=order.id,
                     variant_id=variant_id,
-                    product_name=item_data.get("product_name", ""),
+                    product_name=(
+                        item_data.get("product_name")
+                        or (getattr(v_for_details.product, "name", None) if (v_for_details and getattr(v_for_details, "product", None)) else "")
+                        or ""
+                    ),
                     variant_details=json.dumps(details),
                     quantity=qty,
                     price=price_val,
